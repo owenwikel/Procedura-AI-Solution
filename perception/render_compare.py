@@ -22,10 +22,19 @@ Conventions
   * A candidate scores how well the mesh, viewed from that side with that up-axis,
     matches the photo. Mapping it to a footprint rotation is the placement solver's job.
 
-margin = score(best) - score(second best), as in SPEC 6.6 (< 0.05 -> manual review).
+margin = score(best) - score(second best), as in SPEC 6.6.
 Silhouettes are mirror-symmetric under a 180 deg change of view, so a left-right
 symmetric mesh ties with its own back view and a box has margin 0; `ties_with_best`
 counts those exact ties.
+
+Review and symmetry flags
+  * needs_review: margin < 0.05 (SPEC 6.6). The silhouette cannot pick a side.
+  * label == "arbitrary_symmetric" (A.4): margin < 0.05 AND the footprint aspect
+    a_F/b_F < 1.1, i.e. a near-square footprint whose four facades are genuinely
+    indistinguishable. Any candidate is acceptable (best is just the first tie); route to
+    review. This is correct behaviour, not a bug. It needs `footprint_aspect`; without
+    it the label is never set (needs_review still is), because a low margin on an
+    elongated footprint is a different failure that must not be excused as symmetry.
 
 Usage: python perception/render_compare.py MESH.glb MASK.png [--top N]
 """
@@ -33,6 +42,7 @@ import argparse
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -43,6 +53,9 @@ CANVAS_PX = 128
 PAD_PX = 2
 SUBPIXEL_BITS = 4  # cv2.fillConvexPoly fixed-point precision
 TIE_TOL = 1e-9
+REVIEW_MARGIN = 0.05  # SPEC 6.6: below this the silhouette cannot pick a side
+SYMMETRIC_ASPECT = 1.1  # A.4: footprint a_F/b_F below this is "square"
+ARBITRARY_SYMMETRIC = "arbitrary_symmetric"
 
 # Y-up (glTF) first so exact ties resolve to the glTF-canonical orientation.
 SIGNED_AXES = [(0, 1, 0), (0, -1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)]
@@ -62,6 +75,8 @@ class Comparison:
     second: Candidate
     margin: float
     ties_with_best: int  # other candidates scoring identically to best (symmetry, not evidence)
+    label: Optional[str] = None  # "arbitrary_symmetric" (A.4) or None
+    needs_review: bool = False  # margin < REVIEW_MARGIN (SPEC 6.6); always True when label is set
 
     def to_dict(self):
         return asdict(self)
@@ -159,8 +174,26 @@ def normalised_iou(a, b):
 # ------------------------------------------------------------------- scoring
 
 
-def render_compare(mesh, mask, up_axes=None, theta0=0.0, size=CANVAS_PX):
-    """Score every (up-axis, azimuth) candidate against the photo mask. See the module docstring."""
+def symmetry_label(margin, footprint_aspect):
+    """A.4 'truly symmetric building': margin < 0.05 AND footprint aspect < 1.1 -> "arbitrary_symmetric".
+
+    `footprint_aspect` is a_F/b_F of the footprint's oriented bounding box; a ratio below 1 is
+    read as its reciprocal (which extent is called `a` is arbitrary). None -> cannot say -> None.
+    """
+    if footprint_aspect is None:
+        return None
+    aspect = float(footprint_aspect)
+    if not np.isfinite(aspect) or aspect <= 0:
+        raise ValueError(f"footprint_aspect must be a positive finite ratio, got {footprint_aspect!r}")
+    aspect = max(aspect, 1 / aspect)
+    return ARBITRARY_SYMMETRIC if margin < REVIEW_MARGIN and aspect < SYMMETRIC_ASPECT else None
+
+
+def render_compare(mesh, mask, up_axes=None, theta0=0.0, size=CANVAS_PX, footprint_aspect=None):
+    """Score every (up-axis, azimuth) candidate against the photo mask. See the module docstring.
+
+    `footprint_aspect` (a_F/b_F of the footprint OMBB) enables the A.4 arbitrary_symmetric label.
+    """
     mesh = _as_mesh(mesh)
     target = normalise_mask(_as_mask(mask), size)
     axes = SIGNED_AXES if up_axes is None else [tuple(float(v) for v in a) for a in up_axes]
@@ -175,7 +208,11 @@ def render_compare(mesh, mask, up_axes=None, theta0=0.0, size=CANVAS_PX):
     ranked = sorted(scored, key=lambda c: -c.score)  # stable: ties keep enumeration order
     best, second = ranked[0], ranked[1]
     ties = sum(abs(c.score - best.score) <= TIE_TOL for c in ranked[1:])
-    return Comparison(ranked, best, second, best.score - second.score, ties)
+    margin = best.score - second.score
+    return Comparison(
+        ranked, best, second, margin, ties,
+        label=symmetry_label(margin, footprint_aspect), needs_review=margin < REVIEW_MARGIN,
+    )
 
 
 def main():
@@ -183,13 +220,15 @@ def main():
     parser.add_argument("mesh")
     parser.add_argument("mask")
     parser.add_argument("--top", type=int, default=8, help="how many candidates to print")
+    parser.add_argument("--footprint-aspect", type=float, help="footprint a_F/b_F; enables the arbitrary_symmetric label")
     args = parser.parse_args()
-    result = render_compare(trimesh.load(args.mesh, force="mesh"), args.mask)
+    result = render_compare(trimesh.load(args.mesh, force="mesh"), args.mask, footprint_aspect=args.footprint_aspect)
     for c in result.candidates[: args.top]:
         print(f"up={c.up_axis!s:<14} azimuth={c.azimuth_deg:5.1f}  score={c.score:.3f}")
-    print(f"margin={result.margin:.3f}  ties_with_best={result.ties_with_best}")
-    if result.margin < 0.05:
-        print("margin < 0.05: route to review (SPEC 6.6)", file=sys.stderr)
+    print(f"margin={result.margin:.3f}  ties_with_best={result.ties_with_best}  label={result.label}  needs_review={result.needs_review}")
+    if result.needs_review:
+        why = "arbitrary_symmetric (A.4)" if result.label else f"margin < {REVIEW_MARGIN} (SPEC 6.6)"
+        print(f"route to review: {why}", file=sys.stderr)
     return 0
 
 

@@ -128,6 +128,57 @@ class AsymmetricBuildingTests(unittest.TestCase):
         self.assertGreater(r.best.score, 0.95)
 
 
+class SymmetryLabelTests(unittest.TestCase):
+    """A.4: margin < 0.05 AND footprint aspect < 1.1 -> arbitrary_symmetric, flagged for review."""
+
+    SYM = rc.ARBITRARY_SYMMETRIC
+
+    def test_thresholds_are_strict_on_both_conditions(self):
+        self.assertEqual((rc.REVIEW_MARGIN, rc.SYMMETRIC_ASPECT), (0.05, 1.1))
+        self.assertEqual(rc.symmetry_label(0.0, 1.0), self.SYM)
+        self.assertEqual(rc.symmetry_label(0.049, 1.099), self.SYM)
+        self.assertIsNone(rc.symmetry_label(0.05, 1.0))  # margin exactly 0.05: not symmetric
+        self.assertIsNone(rc.symmetry_label(0.0, 1.1))  # aspect exactly 1.1: not square
+        self.assertIsNone(rc.symmetry_label(0.0, 2.0))  # low margin on an elongated footprint is not symmetry
+        self.assertIsNone(rc.symmetry_label(0.2, 1.0))  # square footprint but the photo does decide
+
+    def test_aspect_below_one_is_read_as_its_reciprocal(self):
+        self.assertEqual(rc.symmetry_label(0.0, 1 / 1.05), self.SYM)
+        self.assertIsNone(rc.symmetry_label(0.0, 1 / 1.5))
+
+    def test_unknown_aspect_never_sets_the_label(self):
+        self.assertIsNone(rc.symmetry_label(0.0, None))
+
+    def test_nonsense_aspect_fails_loudly(self):
+        for bad in (0, -1.0, float("nan"), float("inf")):
+            with self.assertRaisesRegex(ValueError, "footprint_aspect"):
+                rc.symmetry_label(0.0, bad)
+
+    def test_square_footprint_box_is_arbitrary_symmetric_and_flagged(self):
+        square = trimesh.creation.box(extents=(30, 40, 30))  # all four facades identical
+        mask = rect_mask((800, 1000), 150, 300, 400, 300)  # 30 x 40 -> matches every azimuth
+        r = rc.render_compare(square, mask, footprint_aspect=1.0)
+        self.assertAlmostEqual(r.margin, 0.0, places=9)
+        self.assertEqual(r.ties_with_best, 7)  # 2 up-axes x 4 azimuths, minus best
+        self.assertEqual(r.label, self.SYM)
+        self.assertTrue(r.needs_review)
+        self.assertEqual(r.to_dict()["label"], self.SYM)
+
+    def test_low_margin_on_an_elongated_footprint_is_flagged_but_not_called_symmetric(self):
+        mask = rect_mask((800, 1000), 150, 300, 400, 200)
+        for aspect in (1.5, None):
+            r = rc.render_compare(BOX, mask, footprint_aspect=aspect)  # front/back tie, margin 0
+            self.assertAlmostEqual(r.margin, 0.0, places=9)
+            self.assertIsNone(r.label)
+            self.assertTrue(r.needs_review)
+
+    def test_decisive_margin_is_neither_labelled_nor_flagged(self):
+        r = rc.render_compare(stepped_building(), stepped_mask_seen_from_front(), footprint_aspect=1.0)
+        self.assertGreater(r.margin, rc.REVIEW_MARGIN)
+        self.assertIsNone(r.label)
+        self.assertFalse(r.needs_review)
+
+
 class InputTests(unittest.TestCase):
     def test_mask_png_path_and_scene_give_the_same_result_as_arrays(self):
         mask = rect_mask((800, 1000), 150, 300, 400, 200)
