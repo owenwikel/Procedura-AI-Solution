@@ -1,0 +1,11 @@
+﻿.venv/
+__pycache__/
+*.pyc
+.env
+scratch_*.py
+*.ckpt
+*.pth
+*.safetensors
+*.glb
+cache/
+outputs/
