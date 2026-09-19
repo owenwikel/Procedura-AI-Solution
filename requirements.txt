@@ -17,3 +17,7 @@ transformers==5.17.0
 
 # perception/render_compare.py
 trimesh==5.1.0
+
+# confidence/features.py, train.py
+scikit-learn==1.9.1
+matplotlib==3.11.2
