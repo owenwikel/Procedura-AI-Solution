@@ -7,5 +7,4 @@ scratch_*.py
 *.pth
 *.safetensors
 *.glb
-cache/
 outputs/
