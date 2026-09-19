@@ -1,0 +1,5 @@
+# Versions installed in .venv when this was written (Python 3.11).
+# scripts/height_coverage_check.py itself only needs requests.
+requests==2.34.2
+shapely==2.1.2
+pyproj==3.7.2
